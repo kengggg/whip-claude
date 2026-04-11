@@ -107,6 +107,26 @@ Subcommands:
 
 ## Environment knobs
 
+### `WHIP_CLAUDE_TIMEOUT_SECONDS`
+Overrides the local Claude CLI timeout for all modes.
+
+### `WHIP_CLAUDE_TIMEOUT_<MODE>_SECONDS`
+Per-mode timeout override, where `<MODE>` is one of:
+
+- `DEBATE`
+- `ARCHITECTURE`
+- `CODING`
+- `CRITIQUE`
+
+Current built-in defaults:
+
+```text
+debate        420
+architecture  360
+coding        420
+critique      300
+```
+
 ### `WHIP_CLAUDE_SYSTEM_PROMPT`
 Overrides the fallback system prompt passed to local Claude CLI.
 

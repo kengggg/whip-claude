@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +11,12 @@ from typing import Optional
 MIN_EMPTY_CHARS = 80
 MIN_SUBSTANTIVE_CHARS = 250
 QUALITY_KEYWORDS = ["recommend", "recommendation", "option", "options", "tradeoff", "trade-off", "risk", "risks"]
+DEFAULT_CLI_TIMEOUTS = {
+    'debate': 420,
+    'architecture': 360,
+    'coding': 420,
+    'critique': 300,
+}
 MODE_PROMPTS = {
     "debate": [
         "Produce 2-4 options.",
@@ -96,7 +103,10 @@ def extract_from_text(path: Path) -> tuple[str, str]:
     text = read_text(path)
     if len(text.strip()) < MIN_EMPTY_CHARS:
         return 'empty', text
-    return 'success', text
+    verdict, _meta = evaluate_text(text)
+    if verdict == 'sufficient':
+        return 'success', text
+    return 'stale', text
 
 
 def extract_from_acp_log(path: Path) -> tuple[str, str]:
@@ -155,10 +165,24 @@ def extract_from_acp_log(path: Path) -> tuple[str, str]:
     if saw_complete:
         if verdict == 'empty':
             return 'empty', combined
-        return 'success', combined
+        if verdict == 'sufficient':
+            return 'success', combined
+        return 'stale', combined
     if combined:
-        return 'success', combined
+        if verdict == 'sufficient':
+            return 'success', combined
+        return 'stale', combined
     return 'stale', ''
+
+
+def resolve_cli_timeout_seconds(mode: str) -> int:
+    specific = os.getenv(f'WHIP_CLAUDE_TIMEOUT_{mode.upper()}_SECONDS')
+    if specific:
+        return max(1, int(specific))
+    shared = os.getenv('WHIP_CLAUDE_TIMEOUT_SECONDS')
+    if shared:
+        return max(1, int(shared))
+    return DEFAULT_CLI_TIMEOUTS[mode]
 
 
 def apply_acp_result(run_dir: Path, state: dict, status: str, response_text: Optional[str]) -> tuple[str, dict]:
@@ -237,7 +261,7 @@ def build_follow_up_prompt(task: str, prior_response: str) -> str:
     )
 
 
-def call_local_claude(skill_dir: Path, workdir: Path, prompt_file: Path, timeout_seconds: int = 180) -> tuple[str, str, int]:
+def call_local_claude(skill_dir: Path, workdir: Path, prompt_file: Path, timeout_seconds: int) -> tuple[str, str, int]:
     cmd = [str(skill_dir / 'scripts' / 'local-claude-fallback.sh'), str(workdir), str(prompt_file)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=False)
@@ -282,6 +306,7 @@ def init_run(args):
         'last_response_path': None,
         'last_verdict': None,
         'rail_used': None,
+        'cli_timeout_seconds': resolve_cli_timeout_seconds(mode),
         'done': False,
         'error': None,
     }
@@ -335,7 +360,8 @@ def ingest_acp(args):
 def run_cli_common(run_dir: Path, state: dict, prompt_text: str, prompt_name: str):
     prompt_file = run_dir / prompt_name
     write_text(prompt_file, prompt_text)
-    status, output, exit_code = call_local_claude(get_skill_dir(run_dir, state), Path.cwd(), prompt_file)
+    timeout_seconds = int(state.get('cli_timeout_seconds') or resolve_cli_timeout_seconds(state['mode']))
+    status, output, exit_code = call_local_claude(get_skill_dir(run_dir, state), Path.cwd(), prompt_file, timeout_seconds=timeout_seconds)
     response_file = run_dir / f'cli-response-{state["attempt_cli"]}.txt'
     if output:
         write_text(response_file, output + ('\n' if not output.endswith('\n') else ''))
@@ -343,7 +369,12 @@ def run_cli_common(run_dir: Path, state: dict, prompt_text: str, prompt_name: st
         state['last_response_path'] = str(response_file)
     verdict, meta = evaluate_text(output) if status == 'success' else (status, {'chars': 0, 'keyword_hits': 0})
     state['last_verdict'] = verdict
-    detail = {'status': status, 'exit_code': exit_code, 'response_file': str(response_file) if output else None} | meta
+    detail = {
+        'status': status,
+        'exit_code': exit_code,
+        'timeout_seconds': timeout_seconds,
+        'response_file': str(response_file) if output else None,
+    } | meta
     return status, output, verdict, detail
 
 
